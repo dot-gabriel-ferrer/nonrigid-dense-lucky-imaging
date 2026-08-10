@@ -54,22 +54,30 @@ def generate_base_planet(w: int, h: int) -> np.ndarray:
     return textured.astype(np.uint8)
 
 
-def elastic_deformation(img: np.ndarray, alpha: float, sigma: float) -> np.ndarray:
+def elastic_deformation(
+    img: np.ndarray,
+    alpha: float,
+    sigma: float,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
     """Apply smooth elastic displacement to an image to mimic atmospheric turbulence.
 
     Args:
         img: Input image of shape ``(H, W, C)`` or ``(H, W)``.
         alpha: Displacement amplitude scale factor.
         sigma: Gaussian smoothing parameter controlling displacement smoothness.
+        rng: Optional local random number generator used for displacement fields.
 
     Returns:
         Distorted image produced by backward remapping with linear interpolation
         and reflective border handling.
     """
     h, w = img.shape[:2]
+    if rng is None:
+        rng = np.random.default_rng()
 
-    dx = np.random.uniform(low=-1.0, high=1.0, size=(h, w)).astype(np.float32)
-    dy = np.random.uniform(low=-1.0, high=1.0, size=(h, w)).astype(np.float32)
+    dx = rng.uniform(low=-1.0, high=1.0, size=(h, w)).astype(np.float32)
+    dy = rng.uniform(low=-1.0, high=1.0, size=(h, w)).astype(np.float32)
 
     dx = gaussian_filter(dx, sigma=sigma).astype(np.float32) * float(alpha)
     dy = gaussian_filter(dy, sigma=sigma).astype(np.float32) * float(alpha)
@@ -101,8 +109,10 @@ def generate_dataset(num: int) -> List[np.ndarray]:
     images: List[np.ndarray] = []
 
     for seed in range(num):
-        np.random.seed(seed)
-        distorted = elastic_deformation(base, alpha=ELASTIC_ALPHA, sigma=ELASTIC_SIGMA)
+        rng = np.random.default_rng(seed)
+        distorted = elastic_deformation(
+            base, alpha=ELASTIC_ALPHA, sigma=ELASTIC_SIGMA, rng=rng
+        )
         images.append(distorted)
 
     return images
