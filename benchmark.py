@@ -199,7 +199,7 @@ def _snapshot_schedule(num_images: int) -> List[int]:
         Sorted list of integer counts (including ``num_images``).
     """
     import math
-    steps: list[int] = set()
+    steps: set[int] = set()
     # Logarithmic spacing: 2, 3, 4, 6, 8, 12, 16, ... up to num_images
     k = 2
     while k <= num_images:

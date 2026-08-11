@@ -102,7 +102,7 @@ python main.py
 
 This:
 1. Generates 120 synthetic 512×512 planetary frames with elastic turbulence deformation.
-2. Selects the sharpest frame as reference.
+2. Selects the best reference frame using a combined sharpness and geometric-stability score.
 3. Computes dense optical flow from the reference to every other frame.
 4. Warps and saves each corrected frame.
 
@@ -111,7 +111,7 @@ Output folders:
 | Folder | Contents |
 |---|---|
 | `output/1_distorted/` | Raw turbulence-distorted frames |
-| `output/2_reference/` | The selected reference (sharpest) frame |
+| `output/2_reference/` | The selected reference frame (best combined sharpness + stability) |
 | `output/3_corrected/` | Non-rigidly corrected frames |
 
 ### Run the benchmark
@@ -179,15 +179,15 @@ All tunable parameters live in `config.py`:
 |---|---|---|
 | `WIDTH` / `HEIGHT` | 512 | Frame dimensions in pixels |
 | `NUM_IMAGES` | 120 | Number of frames to generate / process |
-| `ELASTIC_ALPHA` | 400.0 | Turbulence displacement amplitude (px scale) |
+| `ELASTIC_ALPHA` | 80.0 | Turbulence displacement amplitude (px scale) |
 | `ELASTIC_SIGMA` | 20.0 | Turbulence smoothness (Gaussian σ in pixels) |
-| `OPTICAL_FLOW_PRESET` | `PRESET_MEDIUM` | DIS accuracy/speed trade-off |
+| `OPTICAL_FLOW_PRESET` | `PRESET_FAST` | DIS accuracy/speed trade-off |
 
 Available `OPTICAL_FLOW_PRESET` values (from `cv2`):
 
 - `cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST` — fastest, lower accuracy
 - `cv2.DISOPTICAL_FLOW_PRESET_FAST`
-- `cv2.DISOPTICAL_FLOW_PRESET_MEDIUM` ← default
+- `cv2.DISOPTICAL_FLOW_PRESET_FAST` ← default
 
 ---
 
