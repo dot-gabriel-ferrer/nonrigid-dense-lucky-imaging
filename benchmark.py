@@ -146,10 +146,84 @@ def run_benchmark(num_images: int = NUM_IMAGES) -> None:
     sample_idx = next(i for i in range(len(images)) if i != ref_idx)
     cv2.imwrite(f"{out_dir}/distorted_sample.png", images[sample_idx])
     flow_sample = compute_dense_flow(ref_img, images[sample_idx])
-    cv2.imwrite(f"{out_dir}/corrected_sample.png", revert_deformation(images[sample_idx], flow_sample))
+    corrected_sample = revert_deformation(images[sample_idx], flow_sample)
+    cv2.imwrite(f"{out_dir}/corrected_sample.png", corrected_sample)
     cv2.imwrite(f"{out_dir}/stacked_average.png", avg_stack)
+
+    # --- comparison strip ---
+    strip_path = _build_comparison_strip(
+        base, images[sample_idx], corrected_sample, avg_stack,
+        num_images, out_dir,
+    )
     print(f"  Output images written to {out_dir}/")
+    print(f"  Comparison strip      : {strip_path}")
     print(f"{'='*64}\n")
+
+
+def _build_comparison_strip(
+    ground_truth: np.ndarray,
+    distorted: np.ndarray,
+    corrected: np.ndarray,
+    stacked: np.ndarray,
+    num_images: int,
+    out_dir: str,
+) -> str:
+    """Build and save a 4-panel labeled comparison strip for the README.
+
+    The four panels are (left to right):
+      1. Ground truth (clean synthetic planet, no turbulence)
+      2. Distorted frame (a representative single turbulent observation)
+      3. Single corrected frame (flow-warped back to GT geometry)
+      4. Stacked average (mean of all corrected frames)
+
+    Args:
+        ground_truth: Clean base planet image (uint8, HxWx3).
+        distorted: Representative raw distorted frame (uint8, HxWx3).
+        corrected: Non-rigidly corrected version of the distorted frame.
+        stacked: Mean stack of all corrected frames (uint8, HxWx3).
+        num_images: Total number of frames stacked (used for the label).
+        out_dir: Directory where the strip PNG will be saved.
+
+    Returns:
+        Absolute path to the saved comparison strip PNG.
+    """
+    panels = [ground_truth, distorted, corrected, stacked]
+    labels = [
+        "Ground truth",
+        "Distorted frame",
+        "Single corrected",
+        f"Stacked ({num_images} frames)",
+    ]
+
+    h, w = ground_truth.shape[:2]
+    label_height = 36
+    border = 4
+    panel_w = w + 2 * border
+    panel_h = h + 2 * border + label_height
+
+    strip = np.zeros((panel_h, panel_w * len(panels), 3), dtype=np.uint8)
+    strip[:] = (40, 40, 40)  # dark gray background
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.60
+    font_thickness = 1
+    text_colour = (220, 220, 220)
+
+    for i, (panel, label) in enumerate(zip(panels, labels)):
+        x0 = i * panel_w + border
+        y0 = border
+        strip[y0: y0 + h, x0: x0 + w] = panel
+
+        # Centred label below the image
+        (tw, th), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+        tx = i * panel_w + (panel_w - tw) // 2
+        ty = border + h + label_height // 2 + th // 2
+        cv2.putText(strip, label, (tx, ty), font, font_scale, text_colour, font_thickness, cv2.LINE_AA)
+
+    strip_path = "docs/assets/comparison_strip_labeled.png"
+    os.makedirs(os.path.dirname(strip_path), exist_ok=True)
+    cv2.imwrite(strip_path, strip)
+    return strip_path
 
 
 if __name__ == "__main__":
