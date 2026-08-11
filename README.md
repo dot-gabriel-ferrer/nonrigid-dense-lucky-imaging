@@ -87,6 +87,7 @@ pip install -r requirements.txt
 opencv-python
 numpy
 scipy
+Pillow
 ```
 
 ---
@@ -130,33 +131,41 @@ NUM_IMAGES=80 python benchmark.py
 
 ## Performance results (synthetic planetary data)
 
-All benchmarks were run on a synthetic 512×512 Jupiter-like gas-giant sequence (120 frames, elastic turbulence α = 1200, σ = 15).  
+All benchmarks were run on a synthetic 512×512 Jupiter-like gas-giant sequence (120 frames, elastic turbulence α = 400, σ = 20).  
 The *ground truth* is the undeformed base image used to generate the sequence.
 
 ### Visual comparison
 
-The four columns below are *(left to right)*: **ground truth → distorted frame → single corrected frame → stacked average**.
+The five columns below are *(left to right)*:  
+**ground truth → lucky frame (reference) → typical distorted frame → single corrected frame → stacked average**
 
 ![Comparison strip](docs/assets/comparison_strip_labeled.png)
 
-The stacked average (rightmost) recovers fine surface banding and storm detail invisible in any individual turbulent frame.
+The stacked average (rightmost) closely matches the ground truth and recovers fine banding and storm detail that is smeared or shifted in any individual turbulent frame.
+
+### Stacking convergence
+
+The animation below shows the running average as more corrected frames are added (left: ground truth; right: current stack).  
+Each frame shows the live PSNR vs ground truth — watch how the image sharpens and converges with each additional frame.
+
+![Stacking convergence](docs/assets/stacking_convergence.gif)
 
 ### Quantitative metrics
 
 | Metric | Distorted frames | Single corrected frame | **Stacked average (120 frames)** |
 |---|---|---|---|
-| PSNR (dB) ↑ | 22.48 | 21.78 | **22.99** |
-| SSIM ↑ | 0.9533 | 0.9461 | **0.9588** |
-| Sharpness (Laplacian var.) ↑ | 21.0 | 36.1 | — |
+| PSNR (dB) ↑ | 31.06 | 31.71 | **32.00** |
+| SSIM ↑ | 0.9934 | 0.9944 | **0.9948** |
+| Sharpness (Laplacian var.) ↑ | 10.0 | 10.6 | — |
 
-> **PSNR gain vs distorted:** +0.51 dB (stacked average)  
-> **SSIM gain vs distorted:** +0.0055 (stacked average)
+> **PSNR gain vs distorted:** +0.66 dB per corrected frame  |  **+0.94 dB** for the full stack  
+> **SSIM gain vs distorted:** +0.0010 per corrected frame  |  **+0.0014** for the full stack
 
 #### Throughput
 
 | Resolution | Frames | Correction time | **FPS** |
 |---|---|---|---|
-| 512 × 512 | 119 | 4.35 s | **≈ 27 fps** |
+| 512 × 512 | 119 | 5.82 s | **≈ 20 fps** |
 
 > Tested on a single CPU core (no GPU). DIS optical flow is the bottleneck; throughput scales linearly with frame count.
 
@@ -170,8 +179,8 @@ All tunable parameters live in `config.py`:
 |---|---|---|
 | `WIDTH` / `HEIGHT` | 512 | Frame dimensions in pixels |
 | `NUM_IMAGES` | 120 | Number of frames to generate / process |
-| `ELASTIC_ALPHA` | 1200.0 | Turbulence displacement amplitude |
-| `ELASTIC_SIGMA` | 15.0 | Turbulence smoothness (Gaussian σ in pixels) |
+| `ELASTIC_ALPHA` | 400.0 | Turbulence displacement amplitude (px scale) |
+| `ELASTIC_SIGMA` | 20.0 | Turbulence smoothness (Gaussian σ in pixels) |
 | `OPTICAL_FLOW_PRESET` | `PRESET_MEDIUM` | DIS accuracy/speed trade-off |
 
 Available `OPTICAL_FLOW_PRESET` values (from `cv2`):
