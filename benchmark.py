@@ -216,6 +216,9 @@ def _build_comparison_strip(
     corrected: np.ndarray,
     stacked: np.ndarray,
     num_stacked: int,
+    *,
+    asset_name: str = "comparison_strip_labeled.png",
+    subtitle: str = "",
 ) -> str:
     """Build and save a 5-panel labeled comparison strip for the README.
 
@@ -233,6 +236,9 @@ def _build_comparison_strip(
         corrected: Non-rigidly corrected version of the distorted frame.
         stacked: Mean stack of all corrected frames (uint8, HxWx3).
         num_stacked: Total number of frames that were stacked.
+        asset_name: Filename (not path) of the output PNG saved under
+            ``docs/assets/``.
+        subtitle: Optional subtitle text rendered below the strip.
 
     Returns:
         Path to the saved comparison strip PNG.
@@ -248,9 +254,10 @@ def _build_comparison_strip(
 
     h, w = ground_truth.shape[:2]
     label_height = 40
+    subtitle_height = 28 if subtitle else 0
     border = 4
     panel_w = w + 2 * border
-    panel_h = h + 2 * border + label_height
+    panel_h = h + 2 * border + label_height + subtitle_height
 
     strip = np.zeros((panel_h, panel_w * len(panels), 3), dtype=np.uint8)
     strip[:] = (30, 30, 30)
@@ -259,6 +266,7 @@ def _build_comparison_strip(
     font_scale = 0.58
     font_thickness = 1
     text_colour = (220, 220, 220)
+    subtitle_colour = (160, 160, 160)
 
     for i, (panel, label) in enumerate(zip(panels, labels)):
         x0 = i * panel_w + border
@@ -271,7 +279,14 @@ def _build_comparison_strip(
         cv2.putText(strip, label, (tx, ty), font, font_scale, text_colour,
                     font_thickness, cv2.LINE_AA)
 
-    path = "docs/assets/comparison_strip_labeled.png"
+    if subtitle:
+        total_w = panel_w * len(panels)
+        (stw, sth), _ = cv2.getTextSize(subtitle, font, 0.48, 1)
+        stx = (total_w - stw) // 2
+        sty = border + h + label_height + subtitle_height // 2 + sth // 2
+        cv2.putText(strip, subtitle, (stx, sty), font, 0.48, subtitle_colour, 1, cv2.LINE_AA)
+
+    path = f"docs/assets/{asset_name}"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     cv2.imwrite(path, strip)
     return path
@@ -280,6 +295,8 @@ def _build_comparison_strip(
 def _build_stacking_gif(
     ground_truth: np.ndarray,
     snapshots: List[Tuple[int, np.ndarray]],
+    *,
+    asset_name: str = "stacking_convergence.gif",
 ) -> str:
     """Build and save an animated GIF showing iterative stacking convergence.
 
@@ -294,6 +311,8 @@ def _build_stacking_gif(
         ground_truth: Clean base planet image (uint8, HxWx3).
         snapshots: List of ``(n_frames, avg_image)`` tuples in increasing order
             of ``n_frames``.
+        asset_name: Filename (not path) of the output GIF saved under
+            ``docs/assets/``.
 
     Returns:
         Path to the saved GIF file.
@@ -338,7 +357,7 @@ def _build_stacking_gif(
         # Convert BGR→RGB for Pillow
         gif_frames.append(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
 
-    path = "docs/assets/stacking_convergence.gif"
+    path = f"docs/assets/{asset_name}"
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     try:
@@ -363,6 +382,165 @@ def _build_stacking_gif(
     return path
 
 
+# ---------------------------------------------------------------------------
+# Realistic 30-minute observation scenario
+# ---------------------------------------------------------------------------
+
+#: Simulated parameters for a realistic planetary session:
+#:   * Camera frame rate  : 30 fps
+#:   * Session duration   : 30 minutes  → 54 000 raw frames
+#:   * Quality selection  : top 10 %    → ~5 400 usable frames
+#:
+#: Running the full 5 400-frame sequence is feasible but slow (~4 min on a
+#: single CPU core).  The constant below is set to 500 frames so the demo
+#: finishes in under a minute while still showing meaningful convergence.
+#: Override with ``REALISTIC_FRAMES=5400 python benchmark.py --realistic``.
+REALISTIC_FRAMES: int = int(os.environ.get("REALISTIC_FRAMES", 500))
+
+#: Parameters that define what "30 min" means in the README labels.
+_REALISTIC_FPS: int = 30
+_REALISTIC_DURATION_MIN: int = 30
+_REALISTIC_SELECTION_PCT: float = 10.0
+
+
+def run_realistic_observation(num_images: int = REALISTIC_FRAMES) -> None:
+    """Run the pipeline for a simulated 30-minute planetary observation.
+
+    Generates a larger synthetic sequence to show how quality converges over
+    an extended real-world session.  Assets are saved separately from the
+    standard benchmark so they can be referenced independently in the README.
+
+    Args:
+        num_images: Number of synthetic frames to process.  Defaults to
+            ``REALISTIC_FRAMES`` (500), which is representative of the
+            best-quality subset from a 30-minute 30-fps session (top ~10 %).
+    """
+    raw_frames = _REALISTIC_FPS * _REALISTIC_DURATION_MIN * 60
+    selected_frames = int(raw_frames * _REALISTIC_SELECTION_PCT / 100)
+
+    print(f"\n{'='*64}")
+    print(f"  Realistic 30-minute Observation Scenario")
+    print(f"{'='*64}")
+    print(f"  Session model  : {_REALISTIC_FPS} fps × {_REALISTIC_DURATION_MIN} min "
+          f"= {raw_frames:,} raw frames")
+    print(f"  Quality cut    : top {_REALISTIC_SELECTION_PCT:.0f} % "
+          f"→ ~{selected_frames:,} usable frames")
+    print(f"  Simulated here : {num_images} frames  "
+          f"(representative subset for fast demo)")
+    print(f"  Resolution     : {WIDTH}×{HEIGHT} px")
+    print(f"{'='*64}\n")
+
+    print("Generating synthetic planetary data…")
+    t0 = time.perf_counter()
+    base = generate_base_planet(WIDTH, HEIGHT)
+    images = generate_dataset(num_images)
+    gen_time = time.perf_counter() - t0
+    print(f"  Generated {num_images} frames in {gen_time:.2f} s\n")
+
+    ref_idx, ref_img = find_reference_frame(images)
+    print(f"  Reference frame : #{ref_idx}  "
+          f"(sharpness={calculate_sharpness(ref_img):.1f}, "
+          f"PSNR vs GT={_psnr(base, ref_img):.2f} dB)\n")
+
+    print("Running correction pipeline…")
+    psnr_before: List[float] = []
+    psnr_after: List[float] = []
+    ssim_before: List[float] = []
+    ssim_after: List[float] = []
+
+    running_sum: np.ndarray = ref_img.astype(np.float64)
+    running_count: int = 1
+    stacking_snapshots: List[Tuple[int, np.ndarray]] = [(1, ref_img.copy())]
+    snapshot_steps = _snapshot_schedule(num_images)
+
+    t1 = time.perf_counter()
+    for i, img in enumerate(images):
+        if i == ref_idx:
+            continue
+        flow = compute_dense_flow(ref_img, img)
+        corrected = revert_deformation(img, flow)
+
+        running_sum += corrected.astype(np.float64)
+        running_count += 1
+
+        if running_count in snapshot_steps:
+            snap = np.clip(running_sum / running_count, 0, 255).astype(np.uint8)
+            stacking_snapshots.append((running_count, snap))
+
+        psnr_before.append(_psnr(base, img))
+        psnr_after.append(_psnr(base, corrected))
+        ssim_before.append(_ssim(base, img))
+        ssim_after.append(_ssim(base, corrected))
+
+    correction_time = time.perf_counter() - t1
+    n = len(psnr_before)
+    fps = n / correction_time
+
+    avg_stack = np.clip(running_sum / running_count, 0, 255).astype(np.uint8)
+    if stacking_snapshots[-1][0] != running_count:
+        stacking_snapshots.append((running_count, avg_stack))
+
+    psnr_stack = _psnr(base, avg_stack)
+    ssim_stack = _ssim(base, avg_stack)
+
+    pb, pa = float(np.mean(psnr_before)), float(np.mean(psnr_after))
+    sb, sa = float(np.mean(ssim_before)), float(np.mean(ssim_after))
+
+    col = 24
+    print(f"\n{'─'*64}")
+    print(f"  {'Metric':<{col}} {'Distorted':>12}  {'Corrected':>12}  {'Stack avg':>12}")
+    print(f"{'─'*64}")
+    print(f"  {'PSNR (dB)':<{col}} {pb:>12.2f}  {pa:>12.2f}  {psnr_stack:>12.2f}")
+    print(f"  {'SSIM':<{col}} {sb:>12.4f}  {sa:>12.4f}  {ssim_stack:>12.4f}")
+    print(f"{'─'*64}")
+    print(f"\n  Throughput  : {n} frames in {correction_time:.2f} s  →  {fps:.1f} fps")
+    print(f"  PSNR gain   : stack vs distorted: +{psnr_stack - pb:.2f} dB  "
+          f"(was +{_psnr(base, ref_img) - pb:.2f} dB from the lucky frame alone)")
+    print()
+
+    # --- save assets ---
+    out_dir = "output/benchmark_realistic"
+    os.makedirs(out_dir, exist_ok=True)
+    cv2.imwrite(f"{out_dir}/ground_truth.png", base)
+    cv2.imwrite(f"{out_dir}/lucky_frame.png", ref_img)
+    sample_idx = next(i for i in range(len(images)) if i != ref_idx)
+    distorted_sample = images[sample_idx]
+    flow_s = compute_dense_flow(ref_img, distorted_sample)
+    corrected_sample = revert_deformation(distorted_sample, flow_s)
+    cv2.imwrite(f"{out_dir}/distorted_sample.png", distorted_sample)
+    cv2.imwrite(f"{out_dir}/corrected_sample.png", corrected_sample)
+    cv2.imwrite(f"{out_dir}/stacked_average.png", avg_stack)
+
+    strip_path = _build_comparison_strip(
+        base, ref_img, distorted_sample, corrected_sample, avg_stack,
+        running_count,
+        asset_name="comparison_strip_realistic.png",
+        subtitle=f"30-min session · {num_images} frames simulated",
+    )
+    gif_path = _build_stacking_gif(
+        base, stacking_snapshots,
+        asset_name="stacking_convergence_realistic.gif",
+    )
+
+    print(f"  Output images       : {out_dir}/")
+    print(f"  Comparison strip    : {strip_path}")
+    print(f"  Stacking GIF        : {gif_path}")
+    print(f"{'='*64}\n")
+
+
 if __name__ == "__main__":
-    n = int(os.environ.get("NUM_IMAGES", NUM_IMAGES))
-    run_benchmark(n)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Lucky-imaging benchmark")
+    parser.add_argument(
+        "--realistic",
+        action="store_true",
+        help="Run the 30-minute realistic observation scenario instead of the default benchmark",
+    )
+    args = parser.parse_args()
+
+    if args.realistic:
+        run_realistic_observation(REALISTIC_FRAMES)
+    else:
+        n = int(os.environ.get("NUM_IMAGES", NUM_IMAGES))
+        run_benchmark(n)
