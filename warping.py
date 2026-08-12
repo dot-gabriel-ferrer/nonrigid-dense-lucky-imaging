@@ -27,8 +27,8 @@ def revert_deformation(target_img: np.ndarray, flow: np.ndarray) -> np.ndarray:
         np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32)
     )
 
-    map_x = x_coords + flow[:, :, 0]
-    map_y = y_coords + flow[:, :, 1]
+    map_x = x_coords - flow[:, :, 0]
+    map_y = y_coords - flow[:, :, 1]
 
     return cv2.remap(
         target_img,

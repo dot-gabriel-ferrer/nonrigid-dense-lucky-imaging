@@ -12,46 +12,115 @@ from config import ELASTIC_ALPHA, ELASTIC_SIGMA, HEIGHT, WIDTH
 
 
 def generate_base_planet(w: int, h: int) -> np.ndarray:
-    """Create a synthetic RGB planetary disk with internal high-frequency texture.
+    """Create a synthetic RGB planetary disk modelled after a gas giant.
+
+    The disk features:
+    * A smooth limb-darkening gradient for physical realism.
+    * Horizontal cloud bands alternating between warm tan and cool cream tones.
+    * Fine high-frequency turbulence texture within each band.
+    * Polar darkening caps at both poles.
+    * A Great-Red-Spot-like oval storm in the southern equatorial belt.
 
     Args:
         w: Output image width in pixels.
         h: Output image height in pixels.
 
     Returns:
-        RGB image of shape ``(h, w, 3)`` and dtype ``uint8`` containing a
-        gray filled planetary disk and high-frequency horizontal textures that
-        remain confined to the interior of the disk.
+        RGB image of shape ``(h, w, 3)`` and dtype ``uint8``.
     """
-    planet = np.zeros((h, w, 3), dtype=np.uint8)
+    rng = np.random.default_rng(seed=42)
 
-    center_x = w // 2
-    center_y = h // 2
-    radius = 150
+    planet = np.zeros((h, w, 3), dtype=np.float32)
 
-    cv2.circle(planet, (center_x, center_y), radius, (150, 150, 150), thickness=-1)
+    cx, cy = w // 2, h // 2
+    radius = min(w, h) // 2 - 20
 
-    y_indices, x_indices = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
-    disk_mask = (x_indices - center_x) ** 2 + (y_indices - center_y) ** 2 <= radius**2
+    y_idx, x_idx = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
+    r_sq = (x_idx - cx) ** 2 + (y_idx - cy) ** 2
+    disk_mask = r_sq <= radius ** 2
 
-    rng = np.random.default_rng(seed=12345)
-    base_pattern = rng.normal(loc=0.0, scale=18.0, size=(h, w)).astype(np.float32)
+    # Normalised latitude/longitude within the disk (-1 … +1)
+    lat = np.where(disk_mask, (y_idx - cy) / radius, 0.0).astype(np.float32)
+    lon_raw = np.where(disk_mask, (x_idx - cx) / radius, 0.0).astype(np.float32)
+    # Convert to proper [-1,1] range accounting for the spherical projection
+    r_norm = np.sqrt(np.clip(r_sq / radius ** 2, 0.0, 1.0)).astype(np.float32)
 
-    stripe_frequency = 0.42
-    stripe_signal = 20.0 * np.sin(y_indices.astype(np.float32) * stripe_frequency)
-    high_frequency_texture = base_pattern + stripe_signal
+    # ------------------------------------------------------------------
+    # Band colour palette  (BGR order)
+    # ------------------------------------------------------------------
+    # Each band defined as (latitude_centre, half_width, BGR_colour)
+    bands = [
+        # polar regions
+        (0.85,  0.20, np.array([90,  100, 110], dtype=np.float32)),
+        (-0.85, 0.20, np.array([90,  100, 110], dtype=np.float32)),
+        # north equatorial belt
+        (0.40,  0.14, np.array([80,  130, 180], dtype=np.float32)),
+        # north temperate belt
+        (0.65,  0.09, np.array([100, 140, 185], dtype=np.float32)),
+        # equatorial zone (bright cream)
+        (0.00,  0.18, np.array([160, 195, 220], dtype=np.float32)),
+        # south equatorial belt
+        (-0.30, 0.16, np.array([90,  135, 190], dtype=np.float32)),
+        # south temperate belt
+        (-0.58, 0.10, np.array([110, 148, 195], dtype=np.float32)),
+        # south polar region
+        (-0.82, 0.12, np.array([85,  105, 115], dtype=np.float32)),
+    ]
 
-    textured = planet.astype(np.float32)
-    for channel in range(3):
-        channel_data = textured[:, :, channel]
-        channel_data[disk_mask] = np.clip(
-            channel_data[disk_mask] + high_frequency_texture[disk_mask],
-            0.0,
-            255.0,
-        )
-        textured[:, :, channel] = channel_data
+    base_colour = np.array([130, 170, 210], dtype=np.float32)  # overall tint
+    colour_map = np.ones((h, w, 3), dtype=np.float32) * base_colour
 
-    return textured.astype(np.uint8)
+    for lat_c, hw, col in bands:
+        weight = np.exp(-0.5 * ((lat - lat_c) / hw) ** 2)
+        weight = weight[:, :, np.newaxis]
+        colour_map = colour_map * (1.0 - weight) + col * weight
+
+    # ------------------------------------------------------------------
+    # Fine-grain texture (simulate cloud turbulence within bands)
+    # ------------------------------------------------------------------
+    noise = rng.standard_normal((h, w)).astype(np.float32)
+    # Anisotropic blur: spread horizontally to mimic zonal flow
+    noise_h = gaussian_filter(noise, sigma=(2.5, 7.0)) * 18.0
+    noise_v = gaussian_filter(noise, sigma=(7.0, 2.5)) * 10.0
+    texture = (noise_h + noise_v).astype(np.float32)
+
+    # Stripe ripple (higher frequency within bands)
+    ripple = (12.0 * np.sin(y_idx.astype(np.float32) * 0.55)
+              + 6.0 * np.sin(y_idx.astype(np.float32) * 1.1 + 0.3)).astype(np.float32)
+    fine_detail = texture + ripple
+
+    for c in range(3):
+        colour_map[:, :, c] += fine_detail * 0.35
+
+    # ------------------------------------------------------------------
+    # Great-Red-Spot-like oval (prominent southern storm)
+    # ------------------------------------------------------------------
+    grs_lat = -0.32        # latitude (in normalised coords)
+    grs_lon = 0.18         # longitude offset
+    grs_a   = 0.145        # semi-axis along longitude
+    grs_b   = 0.065        # semi-axis along latitude
+    grs_colour = np.array([60, 80, 190], dtype=np.float32)  # deep reddish-orange
+
+    grs_dist = ((lat - grs_lat) / grs_b) ** 2 + ((lon_raw - grs_lon) / grs_a) ** 2
+    grs_weight = np.exp(-2.0 * grs_dist).astype(np.float32)
+    grs_weight[~disk_mask] = 0.0
+    grs_weight = grs_weight[:, :, np.newaxis]
+    colour_map = colour_map * (1.0 - grs_weight) + grs_colour * grs_weight
+
+    # ------------------------------------------------------------------
+    # Limb darkening  (cosine law, exponent 0.5 gives gentle falloff)
+    # ------------------------------------------------------------------
+    cos_theta = np.sqrt(np.clip(1.0 - r_norm ** 2, 0.0, 1.0)).astype(np.float32)
+    limb = (cos_theta ** 0.5)[:, :, np.newaxis]
+    colour_map = colour_map * limb
+
+    # ------------------------------------------------------------------
+    # Apply mask and clip
+    # ------------------------------------------------------------------
+    planet = np.where(disk_mask[:, :, np.newaxis], colour_map, 0.0)
+    planet = np.clip(planet, 0.0, 255.0).astype(np.uint8)
+
+    return planet
 
 
 def elastic_deformation(
@@ -116,3 +185,4 @@ def generate_dataset(num: int) -> List[np.ndarray]:
         images.append(distorted)
 
     return images
+
