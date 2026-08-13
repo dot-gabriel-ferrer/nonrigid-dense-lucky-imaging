@@ -1,269 +1,227 @@
-# nonrigid-dense-lucky-imaging
+# Non-Rigid Dense Lucky Imaging
 
-A computational astronomy framework for removing atmospheric turbulence from planetary video sequences.  
-It surpasses classical shift-and-add methods by using **dense optical flow** and **non-rigid elastic warping** to align frames at the sub-pixel level before stacking.
+An experimental planetary-image and video reconstruction pipeline for
+stabilising, stacking and restoring planetary captures. The current
+documentation uses only a real local Saturn sequence; synthetic demonstrations
+and their metrics have been removed.
 
----
+## Real Capture Result
 
-## Table of Contents
+Source: a 53.2-second Saturn video at 640 x 360 pixels and 30 fps, containing
+1,597 frames. The animation below samples the actual source sequence before
+registration. It shows the capture noise, seeing variation and motion that the
+pipeline is designed to correct.
 
-- [Overview](#overview)
-- [How it works](#how-it-works)
-- [Installation](#installation)
-- [Usage](#usage)
-  - [Run the demo pipeline](#run-the-demo-pipeline)
-  - [Run the benchmark](#run-the-benchmark)
-- [Performance results (synthetic planetary data)](#performance-results-synthetic-planetary-data)
-  - [Visual comparison](#visual-comparison)
-  - [Quantitative metrics](#quantitative-metrics)
-- [Realistic 30-minute observation](#realistic-30-minute-observation)
-- [Configuration](#configuration)
-- [Project structure](#project-structure)
+![Sampled Saturn source capture](docs/assets/saturn_source_capture.gif)
 
----
+The reconstruction below uses every frame in progressively longer temporal
+spans. Each span is fully aligned before stacking; no frame is discarded by the
+lucky-imaging selection in this evaluation (`--keep 1.0`). Sigma clipping still
+rejects pixel-level outliers such as transient noise.
 
-## Overview
+![All-frame Saturn reconstruction comparison](docs/assets/saturn_all_frames_comparison.png)
 
-High-resolution planetary imaging from the ground is degraded by **atmospheric seeing**: the random, time-varying refractive index fluctuations in the atmosphere cause each video frame to appear blurred and geometrically distorted in a non-uniform way.
+| Capture span | Decoded and aligned frames | Frames stacked | Output |
+|---|---:|---:|---|
+| First 50% | 799 | 799 | `output/evaluation/first_50_percent/saturn_final.png` |
+| First 75% | 1,198 | 1,198 | `output/evaluation/first_75_percent/saturn_final.png` |
+| Full capture | 1,597 | 1,597 | `output/saturn/saturn_final.png` |
 
-Classical *lucky imaging* selects only the sharpest frames from a video burst, but still discards most of the signal. This project goes further:
+## Processing Pipeline
 
-1. Every frame is **non-rigidly corrected** back to the geometry of the reference (sharpest) frame using dense optical flow.
-2. All corrected frames are **stacked** (averaged), recovering signal-to-noise impossible to achieve from a single frame.
+1. **Decode and crop**: OpenCV decodes the local video. A bright-component
+   detector identifies Saturn and produces a generous square region of interest.
+2. **Object-centred global alignment**: Each native-resolution frame is
+   centred from the planetary centroid, then refined using masked phase
+   correlation and ECC translation registration. The mask prevents the black
+   background from dominating alignment.
+3. **Native non-rigid correction**: enabled by default, dense optical flow is
+   estimated on the original sampling grid and each corrected frame is resampled
+   once onto the reference grid.
+4. **Lucky imaging after correction**: quality scores are computed on corrected
+   planetary frames. By default, `--keep 1.0` retains every frame; lower values
+   are available for controlled experiments.
+5. **Drizzle reconstruction**: original frame samples are splatted onto a
+   $2\times$ dense reference grid using their measured sub-pixel translations
+   and accepted non-rigid fields. This is the default temporal super-resolution
+   step, and writes auditable coverage statistics.
+6. **Restoration**: denoising and a regularised Wiener FFT inverse restore the
+   drizzle stack.
+7. **Post-stack enlargement**: EDSR is applied once to the restored stack,
+   followed by optional dense-mesh back-projection.
 
-The result is a final image that is both geometrically accurate and much deeper than anything a single lucky frame can provide.
+Applying optical flow before the stack is intentional: atmospheric deformation
+is an inter-frame effect. After stacking, the individual displacement fields
+have been mixed and cannot be inferred reliably from one image. EDSR is also
+placed after stacking because frame-wise learned enlargement can make its
+own inconsistent texture appear to be motion for the flow estimator.
 
----
+### Mathematical Model
 
-## How it works
+For frame $I_k$, global registration supplies a translation $t_k$ and native
+non-rigid registration estimates a dense displacement field $u_k$. The corrected
+frame sampled on the reference grid is:
 
+$$
+C_k(x) = I_k\left(x + t_k + u_k(x)\right).
+$$
+
+For the native-grid fallback, the robust weighted stack is formed as:
+
+$$
+S(x) = \frac{\sum_k w_k\,m_k(x)\,C_k(x)}
+              {\sum_k w_k\,m_k(x) + \epsilon},
+$$
+
+where $w_k > 0$ is the quality-derived frame weight and $m_k(x)$ is the
+sigma-clipping inlier mask. The default drizzle implementation below replaces
+this native-grid fallback with direct deposition of original samples. With a
+Gaussian PSF transfer function $H(f)$, the regularised Wiener restoration is:
+
+$$
+\hat{S}(f) = \frac{H^*(f)}{|H(f)|^2 + \lambda}\,\mathcal{F}\{S\}(f).
+$$
+
+Only after this operation does EDSR enlarge $\hat{S}$; it never contributes
+synthetic per-frame detail to the non-rigid motion estimate.
+
+### Drizzle Reconstruction
+
+The default drizzle scale is $s=2$. For every observed source pixel $p$ in
+frame $k$, the global translation $t_k$ and accepted flow $u_k$ map it onto the
+dense reference mesh approximately as:
+
+$$
+q_k(p) = s\left(p + t_k - u_k(p+t_k)\right).
+$$
+
+The measured intensity is deposited by a bilinear footprint $b$ rather than by
+resizing an already averaged image:
+
+$$
+D(q) = \frac{\sum_{k,p} w_k\,I_k(p)\,b\left(q-q_k(p)\right)}
+              {\sum_{k,p} w_k\,b\left(q-q_k(p)\right)+\epsilon}.
+$$
+
+This is the key difference between drizzle and the optional final dense mesh:
+drizzle uses independent samples from the original video before restoration.
+The file `drizzle.csv` reports dense-grid coverage and mean weighted samples per
+covered pixel. High coverage alone is not proof of resolution gain; the
+Fourier diagnostic and the effective per-pixel redundancy must also support it.
+
+## Super-Resolution and Dense Mesh Reconstruction
+
+The optional high-resolution chain is ordered deliberately:
+
+1. **Drizzle stack**: geometry-corrected original samples are deposited on a
+   dense grid before frames are mixed.
+2. **FFT restoration**: the drizzle stack is denoised and deconvolved on its observed
+   sampling grid.
+3. **EDSR 4x**: OpenCV's learned model enlarges the single restored stack.
+4. **Dense mesh back-projection**: `--mesh-scale 2` builds a second, denser
+   pixel lattice from the EDSR output. It repeatedly projects that lattice to
+   the observed grid, and feeds the residual back to its vertices.
+
+This is a data-consistency reconstruction, not a guarantee that new planetary
+features exist. The mesh stage is deliberately optional: inspect its spectrum
+and ringing before using it for measurement or scientific claims.
+
+![EDSR, FFT and dense-mesh stages](docs/assets/saturn_processing_chain.png)
+
+![Registration and frequency-domain diagnostics](docs/assets/saturn_processing_diagnostics.png)
+
+The left diagnostic plots measured sub-pixel translations; broad two-dimensional
+coverage is evidence that multiple frames sample different parts of the dense
+mesh. The right plot shows radial Fourier power on a logarithmic scale. A useful
+restoration extends coherent high-frequency power without isolated spikes or a
+large high-frequency pedestal, both of which indicate sharpening artefacts.
+
+The checked-in mesh example is intentionally a bounded six-frame diagnostic so
+that the complete CPU pipeline is reproducible. Its spectrum exhibits a visible
+mid-frequency rise after dense-mesh reconstruction, so it is presented as an
+artefact-detection example rather than evidence of new resolvable Saturn detail.
+For a scientific result, use substantially more frames and retain the mesh stage
+only when its diagnostic has no such unsupported spectral rise.
+
+Run the complete optional chain as follows:
+
+```bash
+python main.py --video "input/saturn.mp4" --output output/saturn_mesh \
+   --drizzle-scale 2 --superres-scale 4 --mesh-scale 2 --mesh-iterations 5
 ```
-Video burst (N frames)
-        │
-        ▼
-┌─────────────────────────┐
-│  Quality estimation     │  ← Laplacian-variance sharpness score per frame
-│  → select reference     │
-└────────────┬────────────┘
-             │ reference frame
-             ▼
-┌─────────────────────────┐
-│  Dense optical flow     │  ← DIS optical flow (OpenCV) for each frame
-│  (per-frame)            │
-└────────────┬────────────┘
-             │ flow field (H × W × 2)
-             ▼
-┌─────────────────────────┐
-│  Inverse warping        │  ← Lanczos backward remap cancels turbulence
-└────────────┬────────────┘
-             │ corrected frames
-             ▼
-┌─────────────────────────┐
-│  Stack average          │  ← Mean of all corrected frames → final image
-└─────────────────────────┘
-```
-
-### Key design choices
-
-| Component | Method | Why |
-|---|---|---|
-| Sharpness metric | Variance of Laplacian | Simple, fast, excellent discriminator for blur |
-| Optical flow | DIS (Dense Inverse Search) | Sub-pixel accuracy, 20+ fps on CPU for 512²  |
-| Interpolation | Lanczos-4 | Minimal ringing artefacts when resampling fine texture |
-| Stacking | Mean of all corrected frames | SNR grows as √N; geometry errors are averaged out |
-
----
 
 ## Installation
 
-Requires Python ≥ 3.9.
+Python 3.9 or newer is required.
 
 ```bash
 pip install -r requirements.txt
 ```
 
-`requirements.txt`:
+## Run a Reconstruction
 
-```
-opencv-python
-numpy
-scipy
-Pillow
-```
-
----
-
-## Usage
-
-### Run the demo pipeline
+Pass a locally available video to the command-line entry point:
 
 ```bash
-python main.py
+python main.py --video "input/saturn.mp4" --output output/saturn
 ```
 
-This:
-1. Generates 120 synthetic 512×512 planetary frames with elastic turbulence deformation.
-2. Selects the best reference frame using a combined sharpness and geometric-stability score.
-3. Computes dense optical flow from the reference to every other frame.
-4. Warps and saves each corrected frame.
+This uses all aligned frames. It creates:
 
-Output folders:
-
-| Folder | Contents |
+| File | Description |
 |---|---|
-| `output/1_distorted/` | Raw turbulence-distorted frames |
-| `output/2_reference/` | The selected reference frame (best combined sharpness + stability) |
-| `output/3_corrected/` | Non-rigidly corrected frames |
+| `reference.png` | Highest-scoring raw frame used as the registration reference |
+| `stack_linear.png` | Drizzle reconstruction from original sub-pixel frame samples |
+| `drizzle.csv` | Dense-grid coverage and mean weighted sample redundancy |
+| `stack_restored.png` | FFT-restored drizzle image before optional dense-mesh reconstruction |
+| `stack_superres.png` | EDSR enlargement of the FFT-restored stack |
+| `saturn_final.png` | Final image; includes dense-mesh reconstruction when `--mesh-scale` is greater than 1 |
+| `registration.csv` | Per-frame translation and phase/ECC registration diagnostics |
 
-### Run the benchmark
-
-```bash
-python benchmark.py
-```
-
-Runs the full pipeline and prints PSNR, SSIM, and sharpness metrics (distorted vs corrected vs stacked average).  
-You can override the number of frames:
+To run a deliberate lucky-imaging cut after alignment, specify a lower
+fraction explicitly:
 
 ```bash
-NUM_IMAGES=80 python benchmark.py
+python main.py --video "input/saturn.mp4" --output output/saturn_lucky --keep 0.25
 ```
 
-To run the extended **30-minute observation scenario** (500 frames by default):
+To disable drizzle and retain the native sampling grid, pass `--drizzle-scale 1`.
+
+To disable the default native non-rigid correction for an ablation experiment:
 
 ```bash
-python benchmark.py --realistic
-# Use full ~5 400-frame count for maximum realism (slower):
-REALISTIC_FRAMES=5400 python benchmark.py --realistic
+python main.py --video "input/saturn.mp4" --output output/saturn_global --no-nonrigid
 ```
 
----
-
-## Performance results (synthetic planetary data)
-
-All benchmarks were run on a synthetic 512×512 Jupiter-like gas-giant sequence (120 frames, elastic turbulence α = 80, σ = 20).  
-The *ground truth* is the undeformed base image used to generate the sequence.
-
-### Visual comparison
-
-The five columns below are *(left to right)*:  
-**ground truth → lucky frame (reference) → typical distorted frame → single corrected frame → stacked average**
-
-![Comparison strip](docs/assets/comparison_strip_labeled.png)
-
-The stacked average (rightmost) closely matches the ground truth and recovers fine banding and storm detail that is smeared or shifted in any individual turbulent frame.
-
-### Stacking convergence
-
-The animation below shows the running average as more corrected frames are added (left: ground truth; right: current stack).  
-Each frame shows the live PSNR vs ground truth — watch how the image sharpens and converges with each additional frame.
-
-![Stacking convergence](docs/assets/stacking_convergence.gif)
-
-### Quantitative metrics
-
-| Metric | Distorted frames | Single corrected frame | **Stacked average (120 frames)** |
-|---|---|---|---|
-| PSNR (dB) ↑ | 41.68 | 36.80 | **42.18** |
-| SSIM ↑ | 0.9994 | 0.9982 | **0.9995** |
-| Sharpness (Laplacian var.) ↑ | 9.5 | 8.7 | — |
-
-> **PSNR gain vs distorted:** −5.88 dB per single corrected frame (flow + warp introduce noise)  |  **+0.50 dB** for the full stack (noise cancels when averaged)  
-> **SSIM gain vs distorted:** −0.0012 per frame  |  **+0.0001** for the full stack
-
-**Why does a single corrected frame look worse?**  Optical-flow estimation and Lanczos resampling both introduce a small amount of high-frequency noise.  When frames are averaged (stacked), these independent noise terms cancel each other out while the correctly aligned geometry is reinforced — recovering and improving upon the original quality.
-
-#### Throughput
-
-| Resolution | Frames | Correction time | **FPS** |
-|---|---|---|---|
-| 512 × 512 | 119 | 3.97 s | **≈ 30 fps** |
-
-> Tested on a single CPU core (no GPU). DIS optical flow is the bottleneck; throughput scales linearly with frame count.
-
----
-
-## Realistic 30-minute observation
-
-Real planetary observing sessions typically run for **30 minutes** to accumulate enough signal and exploit occasional moments of good seeing.  
-At a typical frame rate of 30 fps, that yields **54 000 raw frames**.  After a quality cut keeping the sharpest **top 10 %**, roughly **5 400 frames** are processed.
-
-The simulation below uses **500 frames** — a representative subset that completes in ~50 s on a single CPU core.  
-Run the full realistic scenario (500 frames by default, overridable) with:
+For a single planetary still, use the same restoration path without temporal
+registration or stacking:
 
 ```bash
-python benchmark.py --realistic
-# or
-REALISTIC_FRAMES=5400 python benchmark.py --realistic
+python main.py --image "input/planet.png" --output output/planet
 ```
 
-### Visual comparison (30-minute session)
+## Reproduce README Assets
 
-![Comparison strip — 30-min session](docs/assets/comparison_strip_realistic.png)
+After reconstructing the full, partial and mesh-processing runs, regenerate
+the README GIF, comparisons and diagnostic plots with:
 
-The five panels show *(left to right)*:  
-**ground truth → lucky frame (reference) → typical distorted frame → single corrected frame → stacked average (500 frames)**
-
-### Stacking convergence (30-minute session)
-
-![Stacking convergence — 30-min session](docs/assets/stacking_convergence_realistic.gif)
-
-Each animation frame shows the running stack (right) vs ground truth (left) with a live PSNR readout.  
-The image visibly sharpens in the first few dozen frames and stabilises as the noise floor is reached.
-
-### Quantitative metrics (500 frames)
-
-| Metric | Distorted frames | Single corrected frame | **Stacked average (500 frames)** |
-|---|---|---|---|
-| PSNR (dB) ↑ | 41.61 | 36.54 | **41.60** |
-| SSIM ↑ | 0.9994 | 0.9981 | **0.9994** |
-
-> With 500 aligned frames the stack converges to a PSNR that matches the distorted average.  The geometric correction ensures that all frames contribute coherently to the same spatial grid; without alignment the mean of 500 turbulent frames would exhibit motion blur on fine structure that cannot be recovered simply by averaging.
-
-#### Throughput
-
-| Resolution | Frames | Correction time | **FPS** |
-|---|---|---|---|
-| 512 × 512 | 499 | 15.73 s | **≈ 32 fps** |
-
----
-
-## Configuration
-
-All tunable parameters live in `config.py`:
-
-| Parameter | Default | Description |
-|---|---|---|
-| `WIDTH` / `HEIGHT` | 512 | Frame dimensions in pixels |
-| `NUM_IMAGES` | 120 | Number of frames to generate / process |
-| `ELASTIC_ALPHA` | 80.0 | Turbulence displacement amplitude (px scale) |
-| `ELASTIC_SIGMA` | 20.0 | Turbulence smoothness (Gaussian σ in pixels) |
-| `OPTICAL_FLOW_PRESET` | `PRESET_FAST` | DIS accuracy/speed trade-off |
-
-Available `OPTICAL_FLOW_PRESET` values (from `cv2`):
-
-- `cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST` — fastest, lower accuracy
-- `cv2.DISOPTICAL_FLOW_PRESET_FAST` ← default
-- `cv2.DISOPTICAL_FLOW_PRESET_MEDIUM` — slower, negligible accuracy gain for this use case
-
----
-
-## Project structure
-
+```bash
+python generate_readme_assets.py
 ```
-.
-├── main.py              # Demo pipeline entrypoint
-├── benchmark.py         # Performance benchmark with PSNR / SSIM metrics
-├── config.py            # Global constants
-├── synthetic_data.py    # Synthetic planet generator + elastic deformation
-├── quality_estimator.py # Laplacian sharpness metric & reference-frame selector
-├── optical_flow.py      # DIS dense optical flow wrapper
-├── warping.py           # Backward remap (inverse warping)
-├── requirements.txt
-└── output/
-    ├── 1_distorted/     # Generated by main.py
-    ├── 2_reference/
-    ├── 3_corrected/
-    ├── benchmark/       # Generated by benchmark.py
-└── docs/
-    └── assets/          # Images used in this README
+
+The script reads `input/saturn.mp4`, the two partial outputs under
+`output/evaluation/`, and the full output under `output/saturn/`, then writes
+the versioned documentation assets to `docs/assets/`.
+
+## Project Structure
+
+```text
+main.py                     Command-line entry point
+video_pipeline.py           Registration, lucky imaging, stacking and restoration
+generate_readme_assets.py   Real-capture GIF and comparison generator
+optical_flow.py             Optional dense optical-flow refinement
+warping.py                  Optical-flow remapping utility
+input/saturn.mp4            Local Saturn source capture
+output/                     Generated reconstruction results
+docs/assets/                README GIF and comparison image
 ```
